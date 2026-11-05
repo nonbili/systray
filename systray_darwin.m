@@ -21,7 +21,7 @@
 #define SYSTRAY_MOD_ALT     (1 << 2)
 #define SYSTRAY_MOD_SUPER   (1 << 3)
 
-@interface MenuItem : NSObject
+@interface SystrayMenuItem : NSObject
 {
   @public
     NSNumber* menuId;
@@ -42,7 +42,7 @@ withShortcutMods: (unsigned int)theShortcutMods
     withDisabled: (short)theDisabled
      withChecked: (short)theChecked;
      @end
-     @implementation MenuItem
+     @implementation SystrayMenuItem
      -(id) initWithId: (int)theMenuId
      withParentMenuId: (int)theParentMenuId
             withTitle: (const char*)theTitle
@@ -98,10 +98,36 @@ withShortcutMods: (unsigned int)theShortcutMods
 @end
 
 
+// Latest image and badge request, owned and applied on the main thread even
+// when the status item has not been created yet.
+static NSArray *pendingTrayIcon;
+
+@interface SystrayUnreadBadge : NSView
+@end
+
+@implementation SystrayUnreadBadge
+- (NSView *)hitTest:(NSPoint)point {
+  return nil;
+}
+
+- (void)drawRect:(NSRect)dirtyRect {
+  NSButton *button = (NSButton *)self.superview;
+  NSRect imageRect = [button.cell imageRectForBounds:button.bounds];
+  NSPoint centre = NSMakePoint(NSMinX(imageRect) + NSWidth(imageRect) * 0.875,
+                              NSMinY(imageRect) + NSHeight(imageRect) * 0.125);
+  CGFloat radius = NSWidth(imageRect) * (2.125 / 16);
+  [[NSColor colorWithSRGBRed:1 green:59.0/255 blue:48.0/255 alpha:1] setFill];
+  [[NSBezierPath bezierPathWithOvalInRect:NSMakeRect(centre.x - radius,
+      centre.y - radius, radius * 2, radius * 2)] fill];
+}
+@end
+
+
 @interface SystrayAppDelegate: NSObject <NSApplicationDelegate, NSMenuDelegate>
-  - (void) add_or_update_menu_item:(MenuItem*) item;
+  - (void) add_or_update_menu_item:(SystrayMenuItem*) item;
   - (IBAction)menuHandler:(id)sender;
   - (void)menuWillOpen:(NSMenu*)menu;
+  - (void)setIconWithBadge:(NSArray *)configuration;
   @property (assign) IBOutlet NSWindow *window;
 @end
 
@@ -110,6 +136,7 @@ withShortcutMods: (unsigned int)theShortcutMods
   NSStatusItem *statusItem;
   NSMenu *menu;
   NSCondition* cond;
+  SystrayUnreadBadge *unreadBadge;
 }
 
 @synthesize window = _window;
@@ -157,6 +184,9 @@ withShortcutMods: (unsigned int)theShortcutMods
   button.autoresizesSubviews = YES;
   [button addSubview:rightClicker];
 
+  if (pendingTrayIcon != nil) {
+    [self setIconWithBadge:pendingTrayIcon];
+  }
   systray_ready();
 }
 
@@ -190,7 +220,24 @@ withShortcutMods: (unsigned int)theShortcutMods
 
 - (void)setIcon:(NSImage *)image {
   statusItem.button.image = image;
+  unreadBadge.hidden = YES;
   [self updateTitleButtonStyle];
+}
+
+- (void)setIconWithBadge:(NSArray *)configuration {
+  if (statusItem.button == nil) {
+    return; // pendingTrayIcon is replayed when the item is created.
+  }
+  [self setIcon:configuration[0]];
+  BOOL unread = [configuration[1] boolValue];
+  NSStatusBarButton *button = statusItem.button;
+  if (unread && unreadBadge == nil) {
+    unreadBadge = [[SystrayUnreadBadge alloc] initWithFrame:button.bounds];
+    unreadBadge.autoresizingMask = NSViewWidthSizable | NSViewHeightSizable;
+    [button addSubview:unreadBadge];
+  }
+  unreadBadge.hidden = !unread;
+  [unreadBadge setNeedsDisplay:YES];
 }
 
 - (void)setTitle:(NSString *)title {
@@ -225,7 +272,7 @@ withShortcutMods: (unsigned int)theShortcutMods
   systray_menu_will_open();
 }
 
-- (void)add_or_update_menu_item:(MenuItem *)item {
+- (void)add_or_update_menu_item:(SystrayMenuItem *)item {
   NSMenu *theMenu = self->menu;
   NSMenuItem *parentItem;
   if ([item->parentMenuId integerValue] > 0) {
@@ -425,12 +472,41 @@ void runInMainThread(SEL method, id object) {
 }
 
 void setIcon(const char* iconBytes, int length, bool template) {
+  setIconWithBadge(iconBytes, length, template, false);
+}
+
+void setIconWithBadge(const char* iconBytes, int length, bool template, bool unread) {
   NSData* buffer = [NSData dataWithBytes: iconBytes length:length];
   @autoreleasepool {
-    NSImage *image = [[NSImage alloc] initWithData:buffer];
-    [image setSize:NSMakeSize(16, 16)];
-    image.template = template;
-    runInMainThread(@selector(setIcon:), (id)image);
+    void (^apply)(void) = ^{
+      NSImage *source = [[NSImage alloc] initWithData:buffer];
+      [source setSize:NSMakeSize(16, 16)];
+      NSImage *image = source;
+      if (template && unread) {
+        // Cut a transparent gap around the dot rather than painting a white
+        // ring. A drawing handler retains resolution on Retina screens.
+        image = [NSImage imageWithSize:NSMakeSize(16, 16) flipped:NO drawingHandler:^BOOL(NSRect rect) {
+          [source drawInRect:rect];
+          CGFloat radius = NSWidth(rect) * (2.625 / 16);
+          NSPoint centre = NSMakePoint(NSMinX(rect) + NSWidth(rect) * 0.875,
+                                      NSMinY(rect) + NSHeight(rect) * 0.125);
+          [NSGraphicsContext saveGraphicsState];
+          [[NSBezierPath bezierPathWithOvalInRect:NSMakeRect(centre.x - radius,
+              centre.y - radius, radius * 2, radius * 2)] addClip];
+          NSRectFillUsingOperation(rect, NSCompositingOperationClear);
+          [NSGraphicsContext restoreGraphicsState];
+          return YES;
+        }];
+      }
+      image.template = template;
+      pendingTrayIcon = @[image, @(unread)];
+      [owner setIconWithBadge:pendingTrayIcon];
+    };
+    if ([NSThread isMainThread]) {
+      apply();
+    } else {
+      dispatch_sync(dispatch_get_main_queue(), apply);
+    }
   }
 }
 
@@ -468,7 +544,7 @@ void setRemovalAllowed(bool allowed) {
 }
 
 void add_or_update_menu_item(int menuId, int parentMenuId, char* title, char* tooltip, char* shortcutKey, unsigned int shortcutMods, short disabled, short checked, short isCheckable) {
-  MenuItem* item = [[MenuItem alloc] initWithId: menuId withParentMenuId: parentMenuId withTitle: title withTooltip: tooltip withShortcutKey: shortcutKey withShortcutMods: shortcutMods withDisabled: disabled withChecked: checked];
+  SystrayMenuItem* item = [[SystrayMenuItem alloc] initWithId: menuId withParentMenuId: parentMenuId withTitle: title withTooltip: tooltip withShortcutKey: shortcutKey withShortcutMods: shortcutMods withDisabled: disabled withChecked: checked];
   free(title);
   free(tooltip);
   free(shortcutKey);
