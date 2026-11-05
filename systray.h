@@ -12,6 +12,7 @@ int nativeLoop(void);
 void nativeStart(void);
 
 void setIcon(const char* iconBytes, int length, bool template);
+void setIconWithBadge(const char* iconBytes, int length, bool template, bool unread);
 void setMenuItemIcon(const char* iconBytes, int length, int menuId, bool template);
 void setTitle(char* title);
 void setTooltip(char* tooltip);

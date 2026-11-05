@@ -80,6 +80,14 @@ func SetTemplateIcon(templateIconBytes []byte, regularIconBytes []byte) {
 	C.setIcon(cstr, (C.int)(len(templateIconBytes)), true)
 }
 
+// SetTemplateIconWithBadge templates the base image and draws a red unread
+// badge separately. The native implementation retains requests made before
+// startup and updates the image and badge together on the main thread.
+func SetTemplateIconWithBadge(templateIconBytes []byte, unread bool) {
+	cstr := (*C.char)(unsafe.Pointer(&templateIconBytes[0]))
+	C.setIconWithBadge(cstr, C.int(len(templateIconBytes)), true, C.bool(unread))
+}
+
 // SetIcon sets the icon of a menu item. Only works on macOS and Windows.
 // iconBytes should be the content of .ico/.jpg/.png
 func (item *MenuItem) SetIcon(iconBytes []byte) {

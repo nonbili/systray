@@ -115,8 +115,7 @@ func SetIcon(iconBytes []byte) {
 		return
 	}
 
-	props.SetMust("org.kde.StatusNotifierItem", "IconPixmap",
-		[]PX{convertToPixels(iconBytes)})
+	props.SetMust("org.kde.StatusNotifierItem", "IconPixmap", iconPixmapValue(iconBytes))
 	if conn == nil {
 		return
 	}
@@ -128,6 +127,32 @@ func SetIcon(iconBytes []byte) {
 	if err != nil {
 		log.Printf("systray error: failed to emit new icon signal: %s\n", err)
 		return
+	}
+}
+
+// SetIconWithName replaces the icon's name, theme path and fallback pixmap
+// together, then emits NewIcon. Hosts can use the named symbolic icon or the
+// current pixmap when they cannot resolve the name. Empty iconBytes clears a
+// previous pixmap, including after the item has been published.
+func SetIconWithName(iconBytes []byte, name, themePath string) {
+	instance.lock.Lock()
+	defer instance.lock.Unlock()
+	instance.iconData = iconBytes
+	iconName, iconThemePath = name, themePath
+	if instance.props == nil {
+		return
+	}
+	props := instance.props
+	props.SetMust("org.kde.StatusNotifierItem", "IconThemePath", themePath)
+	props.SetMust("org.kde.StatusNotifierItem", "IconName", name)
+	props.SetMust("org.kde.StatusNotifierItem", "IconPixmap", iconPixmapValue(iconBytes))
+	if instance.conn != nil {
+		if err := notifier.Emit(instance.conn, &notifier.StatusNotifierItem_NewIconSignal{
+			Path: path,
+			Body: &notifier.StatusNotifierItem_NewIconSignalBody{},
+		}); err != nil {
+			log.Printf("systray error: failed to emit new icon signal: %s\n", err)
+		}
 	}
 }
 
@@ -268,7 +293,7 @@ func nativeStart() {
 		log.Printf("systray error: failed to request name: %s\n", err)
 		// it's not critical error: continue
 	}
-	props, err := prop.Export(conn, path, instance.createPropSpec())
+	err = instance.publishProperties(conn)
 	if err != nil {
 		log.Printf("systray error: failed to export notifier item properties to bus: %s\n", err)
 		return
@@ -309,8 +334,6 @@ func nativeStart() {
 	}
 
 	instance.lock.Lock()
-	instance.conn = conn
-	instance.props = props
 	instance.menuProps = menuProps
 	instance.lock.Unlock()
 
@@ -388,6 +411,23 @@ type tray struct {
 func (t *tray) createPropSpec() map[string]map[string]*prop.Prop {
 	t.lock.Lock()
 	defer t.lock.Unlock()
+	return t.createPropSpecLocked()
+}
+
+// Hold the same lock across the snapshot, export and assignment. Otherwise
+// an icon request between snapshotting and assigning props would be lost.
+func (t *tray) publishProperties(conn *dbus.Conn) error {
+	t.lock.Lock()
+	defer t.lock.Unlock()
+	props, err := prop.Export(conn, path, t.createPropSpecLocked())
+	if err != nil {
+		return err
+	}
+	t.conn, t.props = conn, props
+	return nil
+}
+
+func (t *tray) createPropSpecLocked() map[string]map[string]*prop.Prop {
 	id := t.title
 	if id == "" {
 		id = fmt.Sprintf("systray_%d", os.Getpid())
